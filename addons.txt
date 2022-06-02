@@ -1,0 +1,15 @@
+covid
+emoji
+fonttools
+gtts
+jikanpy
+git+https://github.com/New-dev0/AsyncLyricsExtractor.git
+pokedex.py
+pyfiglet
+pyjokes
+quotefancy
+shazamio
+speechrecognition
+speedtest-cli
+textblob
+wikipedia
