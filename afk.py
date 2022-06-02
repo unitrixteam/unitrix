@@ -1,110 +1,168 @@
-# # Unitrix - UserBot
-# Copyright (C) 2021-2022 UnitrixTeam
+# Ultroid - UserBot
+# Copyright (C) 2021-2022 TeamUltroid
 #
-# This file is a part of < https://github.com/unitrixteam/>
+# This file is a part of < https://github.com/TeamUltroid/Ultroid/ >
 # PLease read the GNU Affero General Public License in
-# https://github.com/unitrixteam/unitrixuserbot/blob/main/LICENSE<>.
+# <https://www.github.com/TeamUltroid/Ultroid/blob/main/LICENSE/>.
+"""
+✘ Commands Available -
 
+• `{i}afk <optional reason>`
+    AFK means away from keyboard,
+    After this is activated, if someone tags or messages you, he/she would get an automated reply from the bot.
 
-from datetime import datetime as dt
+    (Note : Set a media file in afk messages by replying to any media with `{i}afk <reason>`).
 
-from pyUltroid.functions.helper import inline_mention, time_formatter
-from telethon.events import NewMessage
-from telethon.tl.types import (
-    Message,
-    MessageEntityMention,
-    MessageEntityMentionName,
-    User,
+"""
+
+import asyncio
+
+from pyUltroid.dB.afk_db import add_afk, del_afk, is_afk
+from pyUltroid.dB.pmpermit_db import is_approved
+from telegraph import upload_file as uf
+from telethon import events
+
+from . import (
+    LOG_CHANNEL,
+    NOSPAM_CHAT,
+    Redis,
+    asst,
+    get_string,
+    mediainfo,
+    udB,
+    ultroid_bot,
+    ultroid_cmd,
 )
-from telethon.utils import get_display_name
 
-from . import asst, asst_cmd
-
-AFK = {}
+old_afk_msg = []
 
 
-@asst_cmd(pattern="afk", func=lambda x: not x.is_private)
-async def go_afk(event):
-    sender = await event.get_sender()
-    if (not isinstance(sender, User)) or sender.bot:
+@ultroid_cmd(pattern="afk( (.*)|$)", owner_only=True)
+async def set_afk(event):
+    if event.client._bot or is_afk():
         return
-    try:
-        reason = event.text.split(" ", maxsplit=1)[1]
-    except IndexError:
-        reason = None
-    if event.is_reply and not reason:
-        replied = await event.get_reply_message()
-        if not reason and replied.text and not replied.media:
-            reason = replied.text
+    text, media, media_type = None, None, None
+    if event.pattern_match.group(1).strip():
+        text = event.text.split(maxsplit=1)[1]
+    reply = await event.get_reply_message()
+    if reply:
+        if reply.text and not text:
+            text = reply.text
+        if reply.media:
+            media_type = mediainfo(reply.media)
+            if media_type.startswith(("pic", "gif")):
+                file = await event.client.download_media(reply.media)
+                iurl = uf(file)
+                media = f"https://telegra.ph{iurl[0]}"
+            else:
+                media = reply.file.id
+    await event.eor("`Done`", time=2)
+    add_afk(text, media_type, media)
+    ultroid_bot.add_handler(remove_afk, events.NewMessage(outgoing=True))
+    ultroid_bot.add_handler(
+        on_afk,
+        events.NewMessage(
+            incoming=True, func=lambda e: bool(e.mentioned or e.is_private)
+        ),
+    )
+    msg1, msg2 = None, None
+    if text and media:
+        if "sticker" in media_type:
+            msg1 = await ultroid_bot.send_file(event.chat_id, file=media)
+            msg2 = await ultroid_bot.send_message(
+                event.chat_id, get_string("afk_5").format(text)
+            )
         else:
-            reason = replied
-    time_ = dt.now()
-    if AFK.get(event.chat_id):
-        AFK[event.chat_id].update({event.sender_id: {"reason": reason, "time": time_}})
+            msg1 = await ultroid_bot.send_message(
+                event.chat_id, get_string("afk_5").format(text), file=media
+            )
+    elif media:
+        if "sticker" in media_type:
+            msg1 = await ultroid_bot.send_file(event.chat_id, file=media)
+            msg2 = await ultroid_bot.send_message(event.chat_id, get_string("afk_6"))
+        else:
+            msg1 = await ultroid_bot.send_message(
+                event.chat_id, get_string("afk_6"), file=media
+            )
+    elif text:
+        msg1 = await event.respond(get_string("afk_5").format(text))
     else:
-        AFK.update(
-            {event.chat_id: {event.sender_id: {"reason": reason, "time": time_}}}
-        )
-    mention = inline_mention(sender)
-    msg = f"**{mention} went AFK Now!**"
-    if reason and not isinstance(reason, str):
-        await event.reply(reason)
-    else:
-        msg += f"\n\n**Reason : ** `{reason}`"
-    await event.reply(msg)
+        msg1 = await event.respond(get_string("afk_6"))
+    old_afk_msg.append(msg1)
+    if msg2:
+        old_afk_msg.append(msg2)
+        return await asst.send_message(LOG_CHANNEL, msg2.text)
+    await asst.send_message(LOG_CHANNEL, msg1.text)
 
 
-@asst.on(NewMessage(func=lambda x: AFK.get(x.chat_id) and not x.is_private))
-async def make_change(event):
-    if event.text.startswith("/afk"):
+async def remove_afk(event):
+    if event.is_private and udB.get_key("PMSETTING") and not is_approved(event.chat_id):
+        return
+    elif "afk" in event.text.lower():
+        return
+    elif event.chat_id in NOSPAM_CHAT:
+        return
+    if is_afk():
+        _, _, _, afk_time = is_afk()
+        del_afk()
+        off = await event.reply(get_string("afk_1").format(afk_time))
+        await asst.send_message(LOG_CHANNEL, get_string("afk_2").format(afk_time))
+        for x in old_afk_msg:
+            try:
+                await x.delete()
+            except BaseException:
+                pass
+        await asyncio.sleep(10)
+        await off.delete()
+
+
+async def on_afk(event):
+    if event.is_private and Redis("PMSETTING") and not is_approved(event.chat_id):
+        return
+    elif "afk" in event.text.lower():
+        return
+    elif not is_afk():
+        return
+    if event.chat_id in NOSPAM_CHAT:
         return
     sender = await event.get_sender()
-    if (not isinstance(sender, User)) or sender.bot:
+    if sender.bot or sender.verified:
         return
-    chat_ = AFK[event.chat_id]
-    if event.sender_id in chat_.keys():
-        name = get_display_name(event.sender)
-        cha_send = chat_[event.sender_id]
-        time_ = time_formatter((dt.now() - cha_send["time"]).seconds * 1000)
-        msg = f"**{name}** is No Longer AFK!\n**Was AFK for** {time_}"
-        await event.reply(msg)
-        del chat_[event.sender_id]
-        if not chat_:
-            del AFK[event.chat_id]
-    ST_SPAM = []
-    replied = await event.get_reply_message()
-    if replied:
-        name = get_display_name(replied.sender)
-        if replied.sender_id in chat_.keys():
-            s_der = chat_[replied.sender_id]
-            res_ = s_der["reason"]
-            time_ = time_formatter((dt.now() - s_der["time"]).seconds * 1000)
-            msg = f"**{name}** is AFK Currently!\n**From :** {time_}"
-            if res_ and isinstance(res_, str):
-                msg += f"\n**Reason :** {res_}"
-            elif res_ and isinstance(res_, Message):
-                await event.reply(res_)
-            await event.reply(msg)
-        ST_SPAM.append(replied.sender_id)
-    for ent, text in event.get_entities_text():
-        dont_send, entity = None, None
-        if isinstance(ent, MessageEntityMentionName):
-            c_id = ent.user_id
-        elif isinstance(ent, MessageEntityMention):
-            c_id = text
+    text, media_type, media, afk_time = is_afk()
+    msg1, msg2 = None, None
+    if text and media:
+        if "sticker" in media_type:
+            msg1 = await event.reply(file=media)
+            msg2 = await event.reply(get_string("afk_3").format(afk_time, text))
         else:
-            c_id = None
-        if c_id:
-            entity = await event.client.get_entity(c_id)
-        if entity and entity.id in chat_.keys() and entity.id not in ST_SPAM:
-            ST_SPAM.append(entity.id)
-            s_der = chat_[entity.id]
-            name = get_display_name(entity)
-            res_ = s_der["reason"]
-            time_ = time_formatter((dt.now() - s_der["time"]).seconds * 1000)
-            msg = f"**{name}** is AFK Currently!\n**From :** {time_}"
-            if res_ and isinstance(res_, str):
-                msg += f"\n**Reason :** {res_}"
-            elif res_ and isinstance(res_, Message):
-                await event.reply(res_)
-            await event.reply(msg)
+            msg1 = await event.reply(
+                get_string("afk_3").format(afk_time, text), file=media
+            )
+    elif media:
+        if "sticker" in media_type:
+            msg1 = await event.reply(file=media)
+            msg2 = await event.reply(get_string("afk_4").format(afk_time))
+        else:
+            msg1 = await event.reply(get_string("afk_4").format(afk_time), file=media)
+    elif text:
+        msg1 = await event.reply(get_string("afk_3").format(afk_time, text))
+    else:
+        msg1 = await event.reply(get_string("afk_4").format(afk_time))
+    for x in old_afk_msg:
+        try:
+            await x.delete()
+        except BaseException:
+            pass
+    old_afk_msg.append(msg1)
+    if msg2:
+        old_afk_msg.append(msg2)
+
+
+if udB.get_key("AFK_DB"):
+    ultroid_bot.add_handler(remove_afk, events.NewMessage(outgoing=True))
+    ultroid_bot.add_handler(
+        on_afk,
+        events.NewMessage(
+            incoming=True, func=lambda e: bool(e.mentioned or e.is_private)
+        ),
+    )
